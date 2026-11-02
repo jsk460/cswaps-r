@@ -28,14 +28,15 @@ from textual.widgets import Footer, ListView, Static
 
 from claude_swap import remote_control, scratch_guard
 from claude_swap.i18n import t
-from claude_swap.models import AccountsSnapshot
+from claude_swap.models import AccountSnapshot, AccountsSnapshot
 from claude_swap.settings import (
     account_role,
     format_setting_value,
     load_settings,
     role_position,
 )
-from claude_swap.tui.widgets import AccountItem, AccountsPanel, MenuItem
+from claude_swap.tui import folds
+from claude_swap.tui.widgets import AccountCard, AccountItem, AccountsPanel, MenuItem
 
 if TYPE_CHECKING:
     from claude_swap.tui.app import CswapApp
@@ -149,10 +150,33 @@ class DashboardScreen(Screen):
         cfg = load_settings(self.app.switcher.backup_dir)
         return [
             (t("set.order"), "roles-menu"),
+            (t("set.strategy", name=self._strategy_label(cfg.strategy)), "strategy-menu"),
             (t("set.threshold", pct=format_setting_value(cfg.threshold)), "threshold"),
             (t("set.rc", state=self._rc_state_label()), "rc-menu"),
             _back(),
         ]
+
+    # The choices shown on screen. The other names (priority, priority-consume-first)
+    # still work from the command line; the screen only says one is in use.
+    # "best" is not offered: it never returns to a main account by itself.
+    _STRATEGY_CHOICES = ("optimized", "consume-first")
+
+    @classmethod
+    def _strategy_label(cls, name: str) -> str:
+        return t("strategy." + name) if name in cls._STRATEGY_CHOICES else name
+
+    def _strategy_entries(self) -> MenuEntries:
+        current = load_settings(self.app.switcher.backup_dir).strategy
+        entries: MenuEntries = []
+        if current not in self._STRATEGY_CHOICES:
+            entries.append((f"● {t('strategy.advanced', name=current)}", "strategy:keep"))
+        for name in self._STRATEGY_CHOICES:
+            mark = "●" if name == current else " "
+            entries.append(
+                (f"{mark} {t('strategy.' + name)} — {t('strategy.help.' + name)}", f"strategy:{name}")
+            )
+        entries.append(_back())
+        return entries
 
     def _rc_state(self) -> str:
         """"auto" while cswaps keeps it matched to the active account's plan,
@@ -341,6 +365,7 @@ class DashboardScreen(Screen):
         "theme": "crumb.theme", "language": "crumb.language",
         "auto-switch settings": "crumb.settings", "claude code on the web": "crumb.rc",
         "account order": "crumb.order", "disable / enable": "crumb.disable",
+        "regular accounts method": "crumb.strategy",
         "add chatgpt account": "crumb.codex_add",
     }
 
@@ -358,6 +383,8 @@ class DashboardScreen(Screen):
             crumb += "   ·   " + t("dash.auto_status", status=status)
         if self._menu_stack[-1][0] == "account order":
             crumb += "   ·   " + t("dash.order_hint")
+        if self._menu_stack[-1][0] == "regular accounts method":
+            crumb += "   ·   " + t("strategy.order_line")
         self.query_one("#menu-title", Static).update(crumb)
         self.refresh_bindings()
 
@@ -430,6 +457,14 @@ class DashboardScreen(Screen):
             await self._push_menu("claude code on the web", self._rc_entries())
         elif action_id.startswith("rc:"):
             app.apply_remote_control(action_id.split(":", 1)[1])
+            await self._pop_menu()
+            await self._refresh_top_menu(self._settings_entries)
+        elif action_id == "strategy-menu":
+            await self._push_menu("regular accounts method", self._strategy_entries())
+        elif action_id == "strategy:keep":
+            await self._pop_menu()
+        elif action_id.startswith("strategy:"):
+            app.apply_strategy(action_id.split(":", 1)[1])
             await self._pop_menu()
             await self._refresh_top_menu(self._settings_entries)
         elif action_id == "roles-menu":
@@ -508,12 +543,15 @@ class AccountListScreen(Screen):
         if snap is None:
             return
         listview = self.query_one("#accounts", ListView)
-        numbers = [acc.number for acc in snap.accounts]
+        accounts = self._ordered(snap)
+        numbers = [acc.number for acc in accounts]
         if numbers != self._numbers:
             first_build = not self._numbers
             previous = listview.index
             await listview.clear()
-            await listview.extend(AccountItem(acc) for acc in snap.accounts)
+            await listview.extend(
+                AccountItem(acc, folded=self._is_folded(acc)) for acc in accounts
+            )
             self._numbers = numbers
             listview.index = (
                 self._index_after_build(snap, first_build, previous)
@@ -521,9 +559,17 @@ class AccountListScreen(Screen):
                 else None
             )
         else:
-            for item, acc in zip(listview.query(AccountItem), snap.accounts):
-                item.set_account(acc)
+            for item, acc in zip(listview.query(AccountItem), accounts):
+                item.set_account(acc, self._is_folded(acc))
         self._flash_updated(snap, listview)
+
+    def _ordered(self, snap: AccountsSnapshot) -> list[AccountSnapshot]:
+        """The accounts in the order the screen lists them (slot order here)."""
+        return list(snap.accounts)
+
+    def _is_folded(self, acc: AccountSnapshot) -> bool:
+        """Only the watch screen folds; the switch screen always shows full cards."""
+        return False
 
     def _index_after_build(
         self, snap: AccountsSnapshot, first_build: bool, previous: int | None
@@ -537,7 +583,7 @@ class AccountListScreen(Screen):
         return next(
             (
                 i
-                for i, acc in enumerate(snap.accounts)
+                for i, acc in enumerate(self._ordered(snap))
                 if acc.number == snap.active_number
             ),
             0,
@@ -619,11 +665,19 @@ class WatchScreen(AccountListScreen):
         # cursor could not continue into the Codex block below it
         Binding("down,j", "nav_down", show=False, priority=True),
         Binding("up,k", "nav_up", show=False, priority=True),
+        # fold the account under the cursor to one line (selection mode)
+        Binding("left", "fold", t("bind.fold"), priority=True),
+        Binding("right", "unfold", show=False, priority=True),
+        Binding("space", "toggle_fold", show=False),
+        Binding("z", "fold_all", t("bind.fold_all")),
+        Binding("v", "toggle_folded_usage", t("bind.fold_usage")),
     ]
 
     def __init__(self) -> None:
         super().__init__()
         self._selecting = False
+        self._folds = folds.folded(folds.CLAUDE)
+        self.show_folded_usage = folds.show_usage()  # read by the cards when they draw
 
     def compose(self) -> ComposeResult:
         yield from super().compose()
@@ -650,6 +704,102 @@ class WatchScreen(AccountListScreen):
         if action == "select_highlighted" and not self._selecting:
             return False  # hidden and inert until selection is armed
         return True
+
+    def _is_folded(self, acc: AccountSnapshot) -> bool:
+        return folds.claude_key(acc) in self._folds
+
+    def _ordered(self, snap: AccountsSnapshot) -> list[AccountSnapshot]:
+        """Main accounts on top (in the order set), regular ones next, reserve last.
+
+        The slot numbers stay as they are; only the position on screen follows
+        the role. Without any role set the order is the slot order, as before.
+        """
+        cfg = load_settings(self.app.switcher.backup_dir)
+
+        def tier(acc: AccountSnapshot) -> tuple[int, int]:
+            role = account_role(cfg.first, cfg.fallback, acc.number, acc.email)
+            if role == "normal":
+                return (1, 0)
+            value = cfg.first if role == "first" else cfg.fallback
+            return (0 if role == "first" else 2, role_position(value, acc.number, acc.email) or 0)
+
+        return sorted(snap.accounts, key=tier)  # stable: ties keep the slot order
+
+    def _set_fold(self, on: bool) -> None:
+        """Fold or unfold the account under the cursor (Claude list or Codex block).
+
+        With no cursor yet, the first press only brings the cursor up (on the active
+        account), so the user sees which account the next press will fold.
+        """
+        if not self._selecting:
+            self._set_selecting(True)
+            return
+        block = self._codex_block()
+        if block is not None and block.has_cursor:
+            block.fold_selected(on)
+            return
+        item = self.query_one("#accounts", ListView).highlighted_child
+        if isinstance(item, AccountItem):
+            item.set_folded(on)
+            (self._folds.add if on else self._folds.discard)(item.key)
+            folds.save(folds.CLAUDE, self._folds)
+            self._keep_cursor_visible()
+
+    def _keep_cursor_visible(self) -> None:
+        """Folding changes row heights: scroll so the cursor row stays on screen."""
+
+        def scroll() -> None:
+            listview = self.query_one("#accounts", ListView)
+            item = listview.highlighted_child
+            if self._selecting and item is not None:
+                listview.scroll_to_widget(item, animate=False)
+
+        self.call_after_refresh(scroll)
+
+    def action_fold(self) -> None:
+        self._set_fold(True)
+
+    def action_unfold(self) -> None:
+        self._set_fold(False)
+
+    def action_toggle_fold(self) -> None:
+        if not self._selecting:
+            self._set_selecting(True)
+            return
+        block = self._codex_block()
+        if block is not None and block.has_cursor:
+            self._set_fold(not block.folded_selected)
+            return
+        item = self.query_one("#accounts", ListView).highlighted_child
+        if isinstance(item, AccountItem):
+            self._set_fold(not item.folded)
+
+    def action_toggle_folded_usage(self) -> None:
+        """Show or hide the usage percent on folded lines (saved)."""
+        self.show_folded_usage = not self.show_folded_usage
+        folds.set_show_usage(self.show_folded_usage)
+        for card in self.query(AccountCard):
+            card.refresh(layout=True)
+        block = self._codex_block()
+        if block is not None:
+            block.refresh(layout=True)
+        self.app.notify(
+            t("fold.usage_on") if self.show_folded_usage else t("fold.usage_off"), timeout=3
+        )
+
+    def action_fold_all(self) -> None:
+        """Fold every account; when all are folded already, unfold every account."""
+        items = list(self.query_one("#accounts", ListView).query(AccountItem))
+        block = self._codex_block()
+        codex_open = block is not None and block.count and block.any_unfolded
+        fold = codex_open or any(not item.folded for item in items)
+        for item in items:
+            item.set_folded(fold)
+        self._folds = {item.key for item in items} if fold else set()
+        folds.save(folds.CLAUDE, self._folds)
+        if block is not None and block.count:
+            block.fold_all(fold)
+        self._keep_cursor_visible()
 
     def _index_after_build(
         self, snap: AccountsSnapshot, first_build: bool, previous: int | None

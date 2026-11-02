@@ -57,6 +57,7 @@ class CodexAuto:
                   pct=f"{d.fullest:.0f}"),
                 title=t("codex.error"),
             )
+            self._reload_blocks()
             return
         if key == self._told:
             return  # already said; do not repeat every pass
@@ -74,6 +75,17 @@ class CodexAuto:
             )
         else:
             self._app.notify(outcome.detail, title=t("codex.error"), severity="error")
+
+
+    def _reload_blocks(self) -> None:
+        """Show the new active account now, not at the next timed read."""
+        from claude_swap.tui.codex_screen import CodexOverview
+
+        try:
+            for block in self._app.screen.query(CodexOverview):
+                block.load()
+        except Exception:
+            pass  # the screen shows the new account at the next timed read
 
 
 def start(app: Any) -> CodexAuto:

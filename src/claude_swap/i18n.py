@@ -292,9 +292,9 @@ _TEXT: dict[str, tuple[str, str]] = {
     "role.earlier": ("earlier", "앞으로"),
     "role.later": ("later", "뒤로"),
     "role.set": ("{email}: {role}. {note}", "{email}: {role}. {note}"),
-    "role.normal": ("normal", "일반"),
-    "role.first": ("first", "항상 먼저"),
-    "role.last": ("last", "항상 마지막"),
+    "role.normal": ("regular", "일반 계정"),
+    "role.first": ("main", "주 계정"),
+    "role.last": ("reserve", "예비 계정"),
     "app.refreshing_usage": ("Refreshing usage…", "사용량 새로고침 중…"),
     "theme.saved": ("Theme: {name}", "화면 색상: {name}"),
     "theme.save_failed": (
@@ -414,6 +414,17 @@ _TEXT: dict[str, tuple[str, str]] = {
     "bind.best": ("Best pick", "최적 선택"),
     "bind.confirm": ("Confirm", "확인"),
     "bind.refresh": ("Refresh", "새로고침"),
+    "bind.fold": ("Fold ←  Unfold →", "접기 ←  펴기 →"),
+    "bind.fold_all": ("Fold/unfold all", "모두 접기·펴기"),
+    "bind.fold_usage": ("Usage on folded", "접은 줄 사용량"),
+    "fold.usage_on": (
+        "Folded lines now show the usage percent.",
+        "접은 줄에 사용량을 표시합니다.",
+    ),
+    "fold.usage_off": (
+        "Folded lines now show only the name. A used-up limit still shows ⚠.",
+        "접은 줄에 이름만 표시합니다. 한도를 다 쓴 계정은 ⚠로 표시합니다.",
+    ),
     # ---- dashboard (dashboard.py)
     "crumb.menu": ("menu", "메뉴"),
     "crumb.add": ("add account", "계정 추가"),
@@ -423,7 +434,8 @@ _TEXT: dict[str, tuple[str, str]] = {
     "crumb.language": ("language", "언어"),
     "crumb.settings": ("auto-switch settings", "자동전환 설정"),
     "crumb.rc": ("claude code on the web", "웹에서 Claude Code"),
-    "crumb.order": ("account order", "계정 순서"),
+    "crumb.order": ("account roles", "계정 역할"),
+    "crumb.strategy": ("how regular accounts are used", "일반 계정 쓰는 방식"),
     "crumb.disable": ("disable / enable", "계정 끄기 / 켜기"),
     "dash.auto_status": ("auto-switch {status}", "자동전환 {status}"),
     "dash.order_hint": (
@@ -431,8 +443,34 @@ _TEXT: dict[str, tuple[str, str]] = {
         "enter: 역할 바꾸기   u / d: 앞으로 / 뒤로",
     ),
     "set.order": (
-        "Account order…   [first → others (automatic) → last]",
-        "계정 순서 정하기…   [항상 먼저 → 나머지(자동) → 항상 마지막]",
+        "Account roles…   [main → regular → reserve]",
+        "계정 역할 정하기…   [주 계정 → 일반 계정 → 예비 계정]",
+    ),
+    "set.strategy": (
+        "How regular accounts are used…   [{name}]",
+        "일반 계정 쓰는 방식 정하기…   [{name}]",
+    ),
+    "strategy.optimized": ("Waste the least quota", "한도 알뜰히 쓰기"),
+    "strategy.consume-first": ("Soonest reset first", "먼저 리셋되는 계정부터 쓰기"),
+    "strategy.help.optimized": (
+        "uses first what would be lost soonest (recommended)",
+        "안 쓰면 곧 사라지는 한도부터 씁니다 (추천)",
+    ),
+    "strategy.help.consume-first": (
+        "uses the account whose weekly limit restarts soonest, ahead of time",
+        "일주일 한도가 곧 새로 시작되는 계정을 미리 씁니다",
+    ),
+    "strategy.advanced": (
+        "In use (set by command): {name}",
+        "명령어로 정한 방식 사용 중: {name}",
+    ),
+    "strategy.saved": (
+        "Regular accounts: {name}. {note}",
+        "일반 계정 쓰는 방식: {name}. {note}",
+    ),
+    "strategy.order_line": (
+        "order of use: main → regular (by this method) → reserve",
+        "쓰는 순서: 주 계정 → 일반 계정(이 방식에 따라) → 예비 계정",
     ),
     "set.threshold": ("Switch threshold…   [{pct}%]", "전환 기준 정하기…   [{pct}%]"),
     "set.rc": (
@@ -453,9 +491,21 @@ _TEXT: dict[str, tuple[str, str]] = {
         "follow your organization and Claude Code",
         "조직과 Claude Code 설정을 따름",
     ),
-    "role.row_first": ("▲ first #{n}", "▲ 항상 먼저 #{n}"),
-    "role.row_last": ("▼ last #{n}", "▼ 항상 마지막 #{n}"),
-    "role.row_auto": ("  automatic", "  자동"),
+    "role.row_first": ("▲ main #{n}", "▲ 주 계정 #{n}"),
+    "role.row_last": ("▼ reserve #{n}", "▼ 예비 계정 #{n}"),
+    "role.row_auto": ("  regular", "  일반 계정"),
+    "role.desc.first": (
+        "used first, and again as soon as it has room",
+        "한도가 돌아오면 반드시 먼저 씁니다",
+    ),
+    "role.desc.normal": (
+        "used by the chosen method",
+        "고른 방식에 따라 씁니다",
+    ),
+    "role.desc.last": (
+        "kept in reserve; used only when the others are blocked",
+        "아껴 두었다가 다른 계정이 모두 막혔을 때만 씁니다",
+    ),
     "list.switch_to": ("switch to which account?", "어느 계정으로 전환할까요?"),
     "list.watching": ("watching all accounts", "모든 계정 보기"),
     "list.select": (
@@ -476,14 +526,14 @@ _TEXT: dict[str, tuple[str, str]] = {
         "  1. Choose 'Add Claude account…' in the menu below.\n"
         "  2. Choose 'Log in separately…' and sign in with the account to add, in the browser.\n"
         "  3. Repeat for each account. With two or more, choose the order in\n"
-        "     'Auto-switch settings… > Account order…' (always first / always last).\n"
+        "     'Auto-switch settings… > Account roles…' (main / reserve).\n"
         "Your current Claude Code login does not change.",
         "관리 중인 계정이 아직 없습니다.\n"
         "시작하기:\n"
         "  1. 아래 메뉴에서 'Claude 계정 추가하기…'를 선택하세요.\n"
         "  2. '별도로 로그인하기…'를 선택하고, 브라우저에서 추가할 계정으로 로그인하세요.\n"
         "  3. 계정마다 반복하세요. 계정이 2개 이상이면\n"
-        "     '자동전환 설정하기… > 계정 순서 정하기…'에서 항상 먼저 / 항상 마지막을 정하세요.\n"
+        "     '자동전환 설정하기… > 계정 역할 정하기…'에서 주 계정 / 예비 계정을 정하세요.\n"
         "지금 사용중인 Claude Code 로그인은 바뀌지 않습니다.",
     ),
     "card.ahead": ("(ahead of pace)", "(페이스 초과)"),

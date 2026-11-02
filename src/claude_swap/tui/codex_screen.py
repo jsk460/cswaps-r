@@ -22,7 +22,7 @@ from textual.widgets import Footer, ListItem, ListView, Static
 from claude_swap import i18n, pace
 from claude_swap.codex import processes, service, usage
 from claude_swap.i18n import t
-from claude_swap.tui import data
+from claude_swap.tui import data, folds
 from claude_swap.tui.modals import ConfirmModal
 from claude_swap.tui.theme import Palette
 from claude_swap.tui.widgets import usage_bar
@@ -131,17 +131,39 @@ def codex_card_text(
     palette: Palette,
     now: float,
     details: bool = False,
+    folded: bool = False,
+    folded_usage: bool = False,
 ) -> Text:
     """One account as text: its name, then one bar per limit window.
 
     ``answer`` is the usage, a state text from the service (``expired`` or
     ``unreachable``), or None while the first answer is still on its way.
+    ``folded`` keeps one line: the name and the active mark; a ``⚠`` right after the
+    number when a limit is used up or there is an alert; an error state as text.
+    ``folded_usage`` adds each window's percent in its severity colour.
     """
     text = Text()
     text.append(f"{row.number}  ", style=palette.muted)
+    if folded and isinstance(answer, usage.Usage):
+        if _alerts(answer) or any(w.pct >= 100 for w in answer.windows):
+            text.append("⚠ ", style=palette.sev_warn)
     text.append(_name(row), style="bold" if row.active else "")
     if row.active:
         text.append("   " + t("codex.active"), style=palette.sev_ok)
+    if folded:
+        text.append("   ")
+        if isinstance(answer, usage.Usage):
+            if folded_usage:
+                for i, w in enumerate(answer.windows):
+                    text.append((" · " if i else "") + f"{w.label} ", style=palette.muted)
+                    text.append(f"{w.pct:.0f}%", style=palette.severity(w.pct))
+        else:
+            key = {None: "codex.reading", usage.EXPIRED: "codex.expired"}.get(
+                answer, "codex.unreachable"
+            )
+            text.append(t(key), style=palette.muted)
+        text.truncate(max(10, width), overflow="ellipsis")  # one screen line, never wrapped
+        return text
     bar_width = 24 if width >= 90 else max(8, width - 52)
     if isinstance(answer, usage.Usage):
         for w in answer.windows:
@@ -223,6 +245,34 @@ class CodexOverview(Static):
         self._loading = False
         self._data: list[tuple[service.Row, usage.Usage | str | None]] = []
         self._cursor: int | None = None  # set while the user picks an account here
+        self._folded = folds.folded(folds.CODEX)  # account ids shown as one line
+
+    # -- folding (a view choice only; auto-switch ignores it) --
+
+    def _account_id(self, index: int) -> str:
+        return self._data[index][0].entry.account_id
+
+    @property
+    def any_unfolded(self) -> bool:
+        return any(self._account_id(i) not in self._folded for i in range(len(self._data)))
+
+    @property
+    def folded_selected(self) -> bool:
+        if self._cursor is None or self._cursor >= len(self._data):
+            return False
+        return self._account_id(self._cursor) in self._folded
+
+    def fold_selected(self, on: bool) -> None:
+        if self._cursor is None or self._cursor >= len(self._data):
+            return
+        (self._folded.add if on else self._folded.discard)(self._account_id(self._cursor))
+        folds.save(folds.CODEX, self._folded)
+        self.refresh(layout=True)
+
+    def fold_all(self, on: bool) -> None:
+        self._folded = {self._account_id(i) for i in range(len(self._data))} if on else set()
+        folds.save(folds.CODEX, self._folded)
+        self.refresh(layout=True)
 
     # -- cursor (used by the watch screen when the user is choosing an account) --
 
@@ -317,10 +367,20 @@ class CodexOverview(Static):
         from claude_swap.codex import prefs
 
         show = prefs.details()
+        try:
+            folded_usage = bool(getattr(self.screen, "show_folded_usage", False))
+        except Exception:
+            folded_usage = False
         for i, (row, answer) in enumerate(self._data):
             text.append("\n")
             text.append("▌ " if i == self._cursor else "  ", style=palette.accent)
-            text.append_text(codex_card_text(row, answer, width - 2, palette, now, show))
+            text.append_text(
+                codex_card_text(
+                    row, answer, width - 2, palette, now, show,
+                    folded=row.entry.account_id in self._folded,
+                    folded_usage=folded_usage,
+                )
+            )
         return text
 
 

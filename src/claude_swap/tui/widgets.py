@@ -273,7 +273,12 @@ def account_card_text(
 
 
 def mini_account_text(
-    acc: AccountSnapshot, now: float, *, palette: Palette = Palette.DARK
+    acc: AccountSnapshot,
+    now: float,
+    *,
+    palette: Palette = Palette.DARK,
+    folded: bool = False,
+    with_usage: bool = True,
 ) -> Text:
     """One minimized line for an inactive account.
 
@@ -281,15 +286,27 @@ def mini_account_text(
     colored; a window at/over 100% brings its reset countdown along, and a
     maxed per-model window shows as ``Fable (!)``. Sentinel states show
     their label instead.
+
+    ``folded`` is the watch screen's folded account: it also carries the active
+    mark, and a ``⚠`` right after the number when any limit (5h, 7d, spend or a
+    model) is used up, so it survives a cut at the end of a narrow line.
+    ``with_usage=False`` leaves out the percentages; the active mark, the
+    warning sign and an error state stay.
     """
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(f"{acc.number:>2}  ", style=f"bold {palette.muted}")
+    if folded and acc.usage.sentinel is None:
+        rows = usage_rows(acc.usage.last_good, now, acc.usage.fetched_at)
+        if any(pct >= 100 for _label, pct, _suffix, _full in rows):
+            text.append("⚠ ", style=palette.sev_crit)
     if acc.alias:
         text.append(acc.alias, style=f"bold {palette.accent}")
         text.append(f" ({acc.email})", style=palette.foreground)
     else:
         text.append(acc.email, style=palette.foreground)
     text.append(f"  [{acc.display_tag}]", style=palette.muted)
+    if folded and acc.is_active:
+        text.append(i18n.t("card.active"), style=f"bold {palette.accent}")
     if acc.disabled:
         text.append("  " + i18n.t("card.disabled").strip(), style=palette.muted)
     for badge in _policy_badges(acc, "  "):
@@ -300,6 +317,8 @@ def mini_account_text(
     if sentinel is not None:
         style = palette.muted if sentinel == USAGE_API_KEY else palette.sev_warn
         text.append(data.sentinel_label(sentinel), style=style)
+        return text
+    if folded and not with_usage:
         return text
 
     last_good = acc.usage.last_good
@@ -336,7 +355,15 @@ def mini_account_text(
         text.append(f"{name} (!)", style=palette.sev_crit)
         parts += 1
     if not parts:
-        text.append("usage unknown", style=palette.muted)
+        # Only a spend window, say: show what is known instead of "unknown".
+        rows = usage_rows(last_good, now, fetched_at)
+        if rows:
+            for i, (label, pct, _suffix, _full) in enumerate(rows):
+                text.append(" · " if i else "", style=palette.track)
+                text.append(f"{label} ", style=palette.muted)
+                text.append(f"{pct:.0f}%", style=palette.severity(pct))
+        else:
+            text.append("usage unknown", style=palette.muted)
     return text
 
 
@@ -525,34 +552,60 @@ class AccountsPanel(Static):
 class AccountCard(Static):
     """One account rendered full-size (used by the switch screen's list)."""
 
-    def __init__(self, acc: AccountSnapshot, *, threshold: float | None = None) -> None:
+    def __init__(
+        self, acc: AccountSnapshot, *, threshold: float | None = None, folded: bool = False
+    ) -> None:
         super().__init__()
         self._acc = acc
         self._threshold = threshold
+        self._folded = folded
 
-    def set_account(self, acc: AccountSnapshot) -> None:
+    def set_account(self, acc: AccountSnapshot, folded: bool | None = None) -> None:
         self._acc = acc
+        if folded is not None:
+            self._folded = folded
         self.refresh(layout=True)
 
     def render(self) -> Text:
+        palette = Palette.from_theme(self.app.current_theme)
+        if self._folded:
+            # Exactly one screen line: cut at the width, not left to wrap.
+            try:
+                with_usage = bool(getattr(self.screen, "show_folded_usage", False))
+            except Exception:
+                with_usage = False
+            line = mini_account_text(
+                self._acc, time.time(), palette=palette, folded=True, with_usage=with_usage
+            )
+            line.truncate(max(10, self.size.width or 80), overflow="ellipsis")
+            return line
         return account_card_text(
-            self._acc, self.size.width or 80, threshold=self._threshold,
-            palette=Palette.from_theme(self.app.current_theme),
+            self._acc, self.size.width or 80, threshold=self._threshold, palette=palette,
         )
 
 
 class AccountItem(ListItem):
     """ListView row wrapping an :class:`AccountCard`; remembers its slot."""
 
-    def __init__(self, acc: AccountSnapshot) -> None:
-        super().__init__(AccountCard(acc))
+    def __init__(self, acc: AccountSnapshot, *, folded: bool = False) -> None:
+        super().__init__(AccountCard(acc, folded=folded))
         self.number = acc.number
         self.email = acc.email
+        self.key = f"{acc.email}|{acc.org_uuid}"  # same as folds.claude_key
+        self.folded = folded
 
-    def set_account(self, acc: AccountSnapshot) -> None:
+    def set_account(self, acc: AccountSnapshot, folded: bool | None = None) -> None:
         self.number = acc.number
         self.email = acc.email
-        self.query_one(AccountCard).set_account(acc)
+        self.key = f"{acc.email}|{acc.org_uuid}"
+        if folded is not None:
+            self.folded = folded
+        self.query_one(AccountCard).set_account(acc, folded)
+
+    def set_folded(self, on: bool) -> None:
+        self.folded = on
+        card = self.query_one(AccountCard)
+        card.set_account(card._acc, on)
 
 
 class MenuItem(ListItem):

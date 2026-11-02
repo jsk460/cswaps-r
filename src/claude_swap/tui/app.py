@@ -13,9 +13,11 @@ import time
 from dataclasses import replace
 from functools import partial
 
+from textual import events
 from textual.app import App
 from textual.binding import Binding
 from textual.reactive import reactive
+from textual.widgets import Input, TextArea
 from textual.worker import WorkerState
 
 from claude_swap import i18n, printer
@@ -38,6 +40,7 @@ from claude_swap.settings import (
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.tui.autoview import AutoScreen
 from claude_swap.tui.dashboard import DashboardScreen, WatchScreen
+from claude_swap.tui import hangul
 from claude_swap.tui.data import ActionResult, SnapshotSource, format_duration, run_action
 from claude_swap.tui.engine_line import (
     off_text,
@@ -71,6 +74,17 @@ class CswapApp(App):
     # keeps format_duration in whole minutes, so the note never ticks per
     # second.
     SNAPSHOT_AGE_NOTE_S = 60.0
+
+    async def on_event(self, event: events.Event) -> None:
+        # Korean layout on: the key for `s` types `ㄴ`. Send the shortcut's own
+        # letter instead, except while the user types into an input box.
+        if isinstance(event, events.Key):
+            keys = hangul.to_keys(event.character)
+            if keys and not isinstance(self.focused, (Input, TextArea)):
+                for key in keys:
+                    await super().on_event(events.Key(key, key))
+                return
+        await super().on_event(event)
 
     snapshot: reactive[AccountsSnapshot | None] = reactive(None)
     refresh_status: reactive[str] = reactive("")
@@ -875,6 +889,18 @@ class CswapApp(App):
         self.notify(f"{dotted_key} = {saved}. {self._restart_note()}", title=i18n.t("title.saved"))
         return True
 
+    def apply_strategy(self, name: str) -> None:
+        """Choose how regular accounts are used (the autoswitch.strategy setting)."""
+        try:
+            set_setting(self.switcher.backup_dir, "autoswitch.strategy", name)
+        except Exception as exc:
+            self.notify(str(exc), title=i18n.t("title.not_saved"), severity="error")
+            return
+        self.notify(
+            i18n.t("strategy.saved", name=i18n.t("strategy." + name), note=self._restart_note()),
+            title=i18n.t("title.saved"),
+        )
+
     def edit_threshold(self) -> None:
         current = format_setting_value(load_settings(self.switcher.backup_dir).threshold)
         self.push_screen(
@@ -954,7 +980,11 @@ class CswapApp(App):
             self.notify(str(exc), title=i18n.t("title.not_saved"), severity="error")
             return
         self.notify(
-            i18n.t("role.set", email=acc.email, role=i18n.t("role." + role), note=self._restart_note()),
+            i18n.t(
+                "role.set", email=acc.email,
+                role=i18n.t("role." + role) + " — " + i18n.t("role.desc." + {"first": "first", "last": "last"}.get(role, "normal")),
+                note=self._restart_note(),
+            ),
             title=i18n.t("title.saved"),
         )
 
